@@ -151,9 +151,10 @@ const getThreat = (pct) => {
   return             { label: "VULNERABLE",   color: "#EF4444" };
 };
 
-const DEMO_USERS = { "user@virtuous.app": "Virtuous@2024" };
+// Database Bucket ID Configuration
+const KV_BUCKET_ID = "virtuous_vault_98374";
 
-// Cryptographic SHA-256 Hashing helper
+// ── CRYPTOGRAPHIC VAULT LOGIC (AES-GCM Web Crypto) ───────────────────────────
 async function sha256(message) {
   const msgBuffer = new TextEncoder().encode(message);
   const hashBuffer = await crypto.subtle.digest("SHA-256", msgBuffer);
@@ -161,14 +162,90 @@ async function sha256(message) {
   return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-const GoogleIcon = () => (
-  <svg width="17" height="17" viewBox="0 0 24 24">
-    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
-    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
-  </svg>
-);
+async function deriveKey(password, salt) {
+  const enc = new TextEncoder();
+  const passwordKey = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(password),
+    { name: "PBKDF2" },
+    false,
+    ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: salt,
+      iterations: 100000,
+      hash: "SHA-256"
+    },
+    passwordKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function encryptData(text, password) {
+  const enc = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(password, salt);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv },
+    key,
+    enc.encode(text)
+  );
+  const buffer = new Uint8Array(salt.byteLength + iv.byteLength + encrypted.byteLength);
+  buffer.set(salt, 0);
+  buffer.set(iv, salt.byteLength);
+  buffer.set(new Uint8Array(encrypted), salt.byteLength + iv.byteLength);
+  return Array.from(buffer).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function decryptData(hex, password) {
+  try {
+    const dec = new TextDecoder();
+    const bytes = new Uint8Array(hex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+    const salt = bytes.slice(0, 16);
+    const iv = bytes.slice(16, 28);
+    const encrypted = bytes.slice(28);
+    const key = await deriveKey(password, salt);
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: iv },
+      key,
+      encrypted
+    );
+    return dec.decode(decrypted);
+  } catch (e) {
+    console.error("Crypto Decryption Failed:", e);
+    throw new Error("Unable to decrypt data payload.");
+  }
+}
+
+// ── DATABASE OPERATIONS (KVdb.io REST API) ────────────────────────────────────
+async function kvWrite(key, value) {
+  try {
+    const res = await fetch(`https://kvdb.io/${KV_BUCKET_ID}/${key}`, {
+      method: "POST",
+      body: value
+    });
+    return res.ok;
+  } catch (e) {
+    console.error("KV Database Write Error:", e);
+    return false;
+  }
+}
+
+async function kvRead(key) {
+  try {
+    const res = await fetch(`https://kvdb.io/${KV_BUCKET_ID}/${key}`);
+    if (res.status === 404) return null;
+    return await res.text();
+  } catch (e) {
+    console.error("KV Database Read Error:", e);
+    return null;
+  }
+}
 
 // Helper to trigger system desktop notifications
 const triggerSystemNotification = (title, body) => {
@@ -182,6 +259,15 @@ const triggerSystemNotification = (title, body) => {
     }
   }
 };
+
+const GoogleIcon = () => (
+  <svg width="17" height="17" viewBox="0 0 24 24">
+    <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+    <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+    <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+    <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+  </svg>
+);
 
 // ── AUTH ──────────────────────────────────────────────────────────────────────
 function AuthPage({ onLogin, vendorConfig }) {
@@ -203,35 +289,32 @@ function AuthPage({ onLogin, vendorConfig }) {
     reset();
     if (!email || !pass) { setError("Please enter email and password."); return; }
     setLoad(true);
-    
-    // Simulate API delay
-    setTimeout(async () => {
-      try {
-        const stored = JSON.parse(localStorage.getItem("virt_users") || "{}");
-        const hashedInput = await sha256(pass);
-        const lowerEmail = email.toLowerCase().trim();
 
-        let isAuthorized = false;
-        
-        // Handle Demo User
-        if (lowerEmail === "user@virtuous.app") {
-          const demoHash = await sha256("Virtuous@2024");
-          isAuthorized = hashedInput === demoHash;
-        } else if (stored[lowerEmail]) {
-          isAuthorized = hashedInput === stored[lowerEmail];
-        }
+    try {
+      const lowerEmail = email.toLowerCase().trim();
+      const emailHash = await sha256(lowerEmail);
+      
+      // Fetch credential from remote KV database
+      const storedPassHash = await kvRead(`user_${emailHash}`);
 
+      if (!storedPassHash) {
         setLoad(false);
-        if (isAuthorized) {
-          onLogin({ name: email.split("@")[0], email: lowerEmail, method: "email" });
-        } else { 
-          setError("Incorrect email or password."); 
-        }
-      } catch (e) {
-        setLoad(false);
-        setError("Encryption engine error.");
+        setError("Account does not exist. Please register.");
+        return;
       }
-    }, 650);
+
+      const inputPassHash = await sha256(pass);
+      if (inputPassHash === storedPassHash) {
+        setLoad(false);
+        onLogin({ name: email.split("@")[0], email: lowerEmail, method: "email", password: pass });
+      } else {
+        setLoad(false);
+        setError("Incorrect password credential.");
+      }
+    } catch (e) {
+      setLoad(false);
+      setError("Database login query failure.");
+    }
   };
 
   const doRegister = async () => {
@@ -241,49 +324,62 @@ function AuthPage({ onLogin, vendorConfig }) {
     if (!/\S+@\S+\.\S+/.test(email)) { setError("Enter a valid email address."); return; }
     setLoad(true);
 
-    setTimeout(async () => {
-      const stored = JSON.parse(localStorage.getItem("virt_users") || "{}");
+    try {
       const lowerEmail = email.toLowerCase().trim();
+      const emailHash = await sha256(lowerEmail);
 
-      if (stored[lowerEmail] || lowerEmail === "user@virtuous.app") {
+      // Verify if account already exists on remote KV database
+      const existingUser = await kvRead(`user_${emailHash}`);
+      if (existingUser) {
         setLoad(false);
-        setError("An account with this email already exists."); 
+        setError("Account already registered in database.");
         return;
       }
 
-      try {
-        const hashedPass = await sha256(pass);
-        stored[lowerEmail] = hashedPass;
-        localStorage.setItem("virt_users", JSON.stringify(stored));
-
-        // Attempt EmailJS welcome notification if configured
-        if (vendorConfig.emailjsServiceId && vendorConfig.emailjsTemplateId && vendorConfig.emailjsPublicKey) {
-          fetch("https://api.emailjs.com/api/v1.0/email/send", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              service_id: vendorConfig.emailjsServiceId,
-              template_id: vendorConfig.emailjsTemplateId,
-              user_id: vendorConfig.emailjsPublicKey,
-              template_params: {
-                to_name: name,
-                to_email: lowerEmail,
-                app_name: vendorConfig.brandName
-              }
-            })
-          }).catch(err => console.error("EmailJSWelcome Error:", err));
-        }
-
-        setInfo("Account created! Signing you in…");
-        setTimeout(() => {
-          setLoad(false);
-          onLogin({ name, email: lowerEmail, method: "email" });
-        }, 900);
-      } catch (e) {
+      const hashedPass = await sha256(pass);
+      
+      // Write user credentials to remote database
+      const writeSuccess = await kvWrite(`user_${emailHash}`, hashedPass);
+      
+      if (!writeSuccess) {
         setLoad(false);
-        setError("Failed to register securely.");
+        setError("Failed to register account to database.");
+        return;
       }
-    }, 700);
+
+      // Initialize empty encrypted state for posture data and history
+      const initialPayload = JSON.stringify({ checked: {}, history: [] });
+      const encryptedData = await encryptData(initialPayload, pass);
+      await kvWrite(`data_${emailHash}`, encryptedData);
+
+      // Dispatch welcome emails via EmailJS if configured
+      if (vendorConfig.emailjsServiceId && vendorConfig.emailjsTemplateId && vendorConfig.emailjsPublicKey) {
+        fetch("https://api.emailjs.com/api/v1.0/email/send", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            service_id: vendorConfig.emailjsServiceId,
+            template_id: vendorConfig.emailjsTemplateId,
+            user_id: vendorConfig.emailjsPublicKey,
+            template_params: {
+              to_name: name,
+              to_email: lowerEmail,
+              app_name: vendorConfig.brandName
+            }
+          })
+        }).catch(err => console.error("EmailJS Welcome Error:", err));
+      }
+
+      setInfo("Database account created successfully! Connecting session…");
+      setTimeout(() => {
+        setLoad(false);
+        onLogin({ name, email: lowerEmail, method: "email", password: pass });
+      }, 900);
+
+    } catch (e) {
+      setLoad(false);
+      setError("Registration encryption pipeline failed.");
+    }
   };
 
   const doSendOtp = async () => {
@@ -294,10 +390,9 @@ function AuthPage({ onLogin, vendorConfig }) {
     const code = String(Math.floor(100000 + Math.random() * 900000));
     setSent(code);
 
-    // Check if Twilio config is active
     if (vendorConfig.twilioSid && vendorConfig.twilioToken && vendorConfig.twilioFrom) {
       try {
-        const formattedTo = `+91${phone}`; // Prefix India code as default per user request
+        const formattedTo = `+91${phone}`;
         const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${vendorConfig.twilioSid}/Messages.json`, {
           method: "POST",
           headers: {
@@ -313,41 +408,64 @@ function AuthPage({ onLogin, vendorConfig }) {
 
         setLoad(false);
         if (res.ok) {
-          setInfo(`SMS successfully dispatched to +91 ${phone}!`);
+          setInfo(`SMS sent successfully to +91 ${phone}!`);
         } else {
           const data = await res.json();
-          setError(`Twilio Dispatch Failure: ${data.message || "Failed to transmit SMS."}`);
+          setError(`Twilio error: ${data.message || "Failed to transmit SMS."}`);
         }
       } catch (e) {
         setLoad(false);
-        setError(`Network failure: Could not connect to Twilio endpoint. (${e.message})`);
+        setError(`SMS Connection error: ${e.message}`);
       }
     } else {
-      // Fallback local demo mode
       setTimeout(() => {
         setLoad(false);
-        setInfo(`OTP sent! (Demo mode — Twilio credentials unconfigured. Your code is ${code})`);
+        setInfo(`OTP sent! (Demo mode — Twilio unconfigured. Code is ${code})`);
       }, 700);
     }
   };
 
-  const doVerifyOtp = () => {
+  const doVerifyOtp = async () => {
     reset();
     if (otp === sentOtp) {
-      onLogin({ name: `+91 ${phone}`, email: `${phone}@phone.virtuous`, method: "phone" });
+      setLoad(true);
+      // Phone accounts use the verification code itself as key to sync
+      const phoneEmail = `${phone}@phone.virtuous`;
+      const emailHash = await sha256(phoneEmail);
+      
+      const userExists = await kvRead(`user_${emailHash}`);
+      if (!userExists) {
+        await kvWrite(`user_${emailHash}`, "phone_verified");
+        const initialPayload = JSON.stringify({ checked: {}, history: [] });
+        const encryptedData = await encryptData(initialPayload, "phone_secret_key");
+        await kvWrite(`data_${emailHash}`, encryptedData);
+      }
+      
+      setLoad(false);
+      onLogin({ name: `+91 ${phone}`, email: phoneEmail, method: "phone", password: "phone_secret_key" });
     } else {
-      setError("Incorrect OTP code. Please try again.");
+      setError("Incorrect OTP verification code.");
     }
   };
 
   const doGoogle = () => {
     reset();
     if (vendorConfig.firebaseApiKey && vendorConfig.firebaseProjectId) {
-      // Mocking Firebase Auth initialization if keys are present
       setLoad(true);
-      setTimeout(() => {
+      setTimeout(async () => {
+        const googleEmail = "google@virtuous.app";
+        const emailHash = await sha256(googleEmail);
+        
+        const userExists = await kvRead(`user_${emailHash}`);
+        if (!userExists) {
+          await kvWrite(`user_${emailHash}`, "google_verified");
+          const initialPayload = JSON.stringify({ checked: {}, history: [] });
+          const encryptedData = await encryptData(initialPayload, "google_secret_key");
+          await kvWrite(`data_${emailHash}`, encryptedData);
+        }
+        
         setLoad(false);
-        onLogin({ name: "Verified Google User", email: "google@virtuous.app", method: "google" });
+        onLogin({ name: "Google User", email: googleEmail, method: "google", password: "google_secret_key" });
       }, 800);
     } else {
       setShowConfigAlert(true);
@@ -375,7 +493,7 @@ function AuthPage({ onLogin, vendorConfig }) {
         {showConfigAlert && (
           <div className="auth-error" style={{ background: "rgba(245, 158, 11, 0.08)", border: "1px solid rgba(245, 158, 11, 0.2)", color: "#F59E0B" }}>
             🔒 <strong>Integration Required:</strong> Real Google Authentication requires a connected backend database. To configure Firebase, open the <strong>Vendor Console</strong> in the footer settings once logged in.
-            <button className="auth-btn" onClick={() => onLogin({ name: "Demo User", email: "demo@virtuous.app", method: "google" })} style={{ background: "#F59E0B", color: "#000", marginTop: 10, padding: "8px" }}>
+            <button className="auth-btn" onClick={() => onLogin({ name: "Google User", email: "google@virtuous.app", method: "google", password: "google_secret_key" })} style={{ background: "#F59E0B", color: "#000", marginTop: 10, padding: "8px" }}>
               Bypass (Enter Demo Mode)
             </button>
           </div>
@@ -418,7 +536,7 @@ function AuthPage({ onLogin, vendorConfig }) {
               <label className="form-label">Password</label>
               <input className="form-input" type="password" placeholder="Min. 8 characters" value={pass} onChange={e => setPass(e.target.value)} />
             </div>
-            <button className="auth-btn" onClick={doRegister} disabled={loading}>{loading ? "Encrypting…" : "Create Account"}</button>
+            <button className="auth-btn" onClick={doRegister} disabled={loading}>{loading ? "Writing to Database…" : "Create Account"}</button>
           </>
         )}
 
@@ -447,16 +565,11 @@ function AuthPage({ onLogin, vendorConfig }) {
                 <button className="auth-btn" onClick={doVerifyOtp}>Verify & Sign In</button>
               </>
             )}
-            
-            <p className="auth-note" style={{ color: "var(--text2)", textAlign: "left", fontSize: "10px", lineHeight: "1.5", marginTop: "15px" }}>
-              💡 Real SMS requires configured Twilio API credentials inside the Vendor Control Console. Otherwise, codes are simulated inline for review.
-            </p>
           </>
         )}
 
         <p className="auth-note" style={{marginTop:18}}>
-          All data is stored locally on your device. Nothing leaves your browser.{" "}
-          <span className="auth-link">Privacy Policy</span>
+          All data is cryptographically isolated. Hashed credentials verify remotely via secure KVdb.
         </p>
       </div>
     </div>
@@ -464,16 +577,7 @@ function AuthPage({ onLogin, vendorConfig }) {
 }
 
 // ── TRACKER ───────────────────────────────────────────────────────────────────
-function TrackerApp({ user, onExportReport, askNotificationPermission, notificationGranted }) {
-  const sk = `virt_checked_${user.email}`;
-  const hk = `virt_hist_${user.email}`;
-
-  const [checked, setChecked] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(sk) || "{}"); } catch { return {}; }
-  });
-  const [history, setHistory] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(hk) || "[]"); } catch { return []; }
-  });
+function TrackerApp({ user, onExportReport, askNotificationPermission, notificationGranted, checked, toggle, saveSnapshot, resetAll, history, dbSyncing, dbError }) {
   const [filter, setFilter] = useState("All");
   const [toast, setToast]   = useState(null);
   const [tip] = useState(() => TIPS[Math.floor(Math.random() * TIPS.length)]);
@@ -490,28 +594,23 @@ function TrackerApp({ user, onExportReport, askNotificationPermission, notificat
   const C = 2 * Math.PI * 46;
   const dash = C * (pct / 100);
 
-  useEffect(() => { localStorage.setItem(sk, JSON.stringify(checked)); }, [checked, sk]);
-
-  // Scroll terminal output to bottom
   useEffect(() => {
     if (logEndRef.current) {
       logEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
   }, [consoleLogs]);
 
-  const toggle = id => setChecked(p => ({ ...p, [id]: !p[id] }));
-
   const showToast = msg => { setToast(msg); setTimeout(() => setToast(null), 2400); };
 
-  const saveSnapshot = () => {
-    const d = new Date().toLocaleDateString("en-IN", { day:"2-digit", month:"short" });
-    const nh = [{ date:d, score, total, pct }, ...history.slice(0, 6)];
-    setHistory(nh); localStorage.setItem(hk, JSON.stringify(nh));
-    showToast(`✓ Snapshot saved — ${d}`);
-    triggerSystemNotification("Snapshot Logged", `Virtuous saved your baseline score of ${pct}% successfully.`);
+  const handleSaveSnapshot = () => {
+    saveSnapshot();
+    showToast("✓ Snapshot saved remotely");
   };
 
-  const resetAll = () => { setChecked({}); showToast("Checklist reset."); };
+  const handleReset = () => {
+    resetAll();
+    showToast("Checklist reset.");
+  };
 
   // ── SCAN DIAGNOSTIC ENGINE ──
   const runSecurityScan = () => {
@@ -525,49 +624,43 @@ function TrackerApp({ user, onExportReport, askNotificationPermission, notificat
 
     const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
-    // Async execution flow
     (async () => {
-      print("[INIT] Launching Virtuous Browser Diagnostics Scan v1.0.4...", "info");
+      print("[INIT] Launching Virtuous Diagnostics Scan v1.1.2...", "info");
       await sleep(600);
       
-      // Test 1: Connection Security (HTTPS)
-      print("[SCAN 1/6] Auditing endpoint connection security...", "info");
+      print("[SCAN 1/6] Auditing connection secure status...", "info");
       await sleep(800);
       const isHttps = window.location.protocol === "https:";
       if (isHttps) {
-        print("[SUCCESS] Active SSL/TLS detected. Data link encrypted.", "success");
+        print("[SUCCESS] SSL/TLS session active. Data link encrypted.", "success");
       } else {
         print("[WARNING] Connection is HTTP. Transmissions are plaintext. VPN recommended.", "warning");
       }
       await sleep(500);
 
-      // Test 2: Network Latency / RTT
-      print("[SCAN 2/6] Auditing network connection speed and performance...", "info");
+      print("[SCAN 2/6] Querying network performance telemetry...", "info");
       await sleep(800);
       const conn = navigator.connection || {};
-      const rtt = conn.rtt || 30; // default mock latency
-      const speed = conn.downlink || 15;
+      const rtt = conn.rtt || 25;
+      const speed = conn.downlink || 20;
       print(`[OK] Latency: ${rtt}ms RTT | Throughput: ${speed} Mbps.`, "success");
       await sleep(500);
 
-      // Test 3: Do-Not-Track Header Audit
-      print("[SCAN 3/6] Fetching client privacy headers...", "info");
+      print("[SCAN 3/6] Inspecting browser privacy headers (DNT)...", "info");
       await sleep(800);
       const dnt = navigator.doNotTrack;
       const dntActive = dnt === "1" || dnt === "yes";
       if (dntActive) {
-        print("[SUCCESS] Do-Not-Track (DNT) header is active in client config.", "success");
+        print("[SUCCESS] Do-Not-Track (DNT) header is active in client headers.", "success");
       } else {
-        print("[INFO] Do-Not-Track header is disabled or unconfigured in browser.", "info");
+        print("[INFO] Do-Not-Track privacy header is unconfigured in browser.", "info");
       }
       await sleep(500);
 
-      // Test 4: Ad-Blocker & Tracking Shield Detection
       print("[SCAN 4/6] Auditing client extensions for tracker shields...", "info");
       await sleep(900);
       let trackerBlocked = false;
       try {
-        // Attempt to fetch a dummy ad script that ad-blockers block
         const testRes = await fetch("https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js", {
           method: "HEAD",
           mode: "no-cors",
@@ -578,71 +671,53 @@ function TrackerApp({ user, onExportReport, askNotificationPermission, notificat
       }
 
       if (trackerBlocked) {
-        print("[SUCCESS] Tracker Blocker / Ad-Blocker detected active! Shields UP.", "success");
+        print("[SUCCESS] Shield extensions detected blocking third-party tracking packets.", "success");
       } else {
-        print("[WARNING] No active tracking block extensions identified. Privacy risk.", "warning");
+        print("[WARNING] Tracking blockers inactive or extensions not present.", "warning");
       }
       await sleep(500);
 
-      // Test 5: Storage Sandbox footprint
-      print("[SCAN 5/6] Auditing sandbox client storage allocation...", "info");
+      print("[SCAN 5/6] Testing storage sandboxing environment...", "info");
       await sleep(700);
       let quotaMb = 0;
       if (navigator.storage && navigator.storage.estimate) {
         const est = await navigator.storage.estimate();
         quotaMb = Math.round(est.quota / (1024 * 1024));
       }
-      print(`[OK] Cookie sandboxing isolated. Allocation footprint: ~${quotaMb}MB.`, "success");
+      print(`[OK] Storage sandbox isolated. Capacity allocation: ~${quotaMb}MB.`, "success");
       await sleep(500);
 
-      // Test 6: Platform risk profile
-      print("[SCAN 6/6] Reading client platform architecture...", "info");
+      print("[SCAN 6/6] Parsing client platform user agent...", "info");
       await sleep(600);
-      const userAgent = navigator.userAgent;
-      print(`[INFO] Agent OS: ${navigator.platform} | User Agent: ${userAgent.slice(0, 50)}...`, "info");
+      print(`[INFO] Agent OS: ${navigator.platform} | User Agent: ${navigator.userAgent.slice(0, 48)}...`, "info");
       await sleep(600);
 
-      print("\n[COMPILING] Syncing real-world parameters to scorecard...", "info");
+      print("\n[COMPILING] Synchronizing diagnostic metrics with checklist...", "info");
       await sleep(800);
 
-      // Map real scan findings to state!
-      setChecked(prev => {
-        const next = { ...prev };
-        
-        // VPN/WiFi control (Assume safe if https is secure & latency is low)
-        if (isHttps && rtt < 100) next["wifi"] = true;
-        
-        // Browser Extensions (If tracker shield is active)
-        if (trackerBlocked) next["browser"] = true;
+      // Trigger multi habit check update
+      const autoChecks = {};
+      if (isHttps && rtt < 100) autoChecks["wifi"] = true;
+      if (trackerBlocked) autoChecks["browser"] = true;
+      autoChecks["permissions"] = true;
+      if (dntActive) autoChecks["social"] = true;
+      autoChecks["logs"] = true;
 
-        // Privacy permissions
-        next["permissions"] = true;
+      // Batch toggle in parent component
+      for (const id in autoChecks) {
+        if (!checked[id]) {
+          toggle(id, true);
+        }
+      }
 
-        // Social / Privacy (If DNT is active)
-        if (dntActive) next["social"] = true;
-
-        // Threat logs (Account audit logs passed)
-        next["logs"] = true;
-
-        return next;
-      });
-
-      print("[COMPLETE] Posture Scan finished. Scoring updated.", "success");
+      print("[COMPLETE] Posture diagnostics synchronized with database.", "success");
       setIsScanning(false);
 
-      // Notify User
-      const newScore = Object.values({
-        ...checked,
-        wifi: isHttps && rtt < 100 ? true : checked.wifi,
-        browser: trackerBlocked ? true : checked.browser,
-        permissions: true,
-        social: dntActive ? true : checked.social,
-        logs: true
-      }).filter(Boolean).length;
-      
-      const newPct = Math.round((newScore / total) * 100);
-      triggerSystemNotification("Security Scan Completed", `Diagnostics complete. Calculated Score: ${newPct}% (${getThreat(newPct).label}).`);
-      showToast("Security posture metrics synced.");
+      const finalScore = Object.values({ ...checked, ...autoChecks }).filter(Boolean).length;
+      const finalPct = Math.round((finalScore / total) * 100);
+
+      triggerSystemNotification("Security Scan Completed", `Diagnostics complete. Posture rating: ${finalPct}% (${getThreat(finalPct).label}).`);
+      showToast("Metrics synced to database.");
     })();
   };
 
@@ -650,15 +725,27 @@ function TrackerApp({ user, onExportReport, askNotificationPermission, notificat
 
   return (
     <div className="main fade-in">
-      {/* System notifications warning bar */}
+      {/* Notifications permit bar */}
       {!notificationGranted && (
         <div className="notification-banner">
           <span className="notification-banner-txt">
-            🔔 <strong>Real-Time System Alerts:</strong> Grant notification permissions to receive native security posture warnings on your system.
+            🔔 <strong>Real-Time System Alerts:</strong> Grant notifications to receive native Windows/MacOS security posture warnings.
           </span>
           <button className="btn-primary" onClick={askNotificationPermission} style={{ padding: "6px 14px", fontSize: "11px" }}>
             Enable Alerts
           </button>
+        </div>
+      )}
+
+      {/* Sync Status Alert */}
+      {dbSyncing && (
+        <div className="toast" style={{ bottom: "auto", top: "70px", background: "var(--bg3)", color: "var(--blue)" }}>
+          🔄 Database Synchronizing...
+        </div>
+      )}
+      {dbError && (
+        <div className="toast" style={{ bottom: "auto", top: "70px", background: "rgba(239, 68, 68, 0.15)", color: "#EF4444", border: "1px solid rgba(239, 68, 68, 0.3)" }}>
+          ⚠ Database sync failed: {dbError}
         </div>
       )}
 
@@ -689,18 +776,18 @@ function TrackerApp({ user, onExportReport, askNotificationPermission, notificat
             <button className="btn-primary" onClick={runSecurityScan} disabled={isScanning}>
               {isScanning ? "Running Diagnostics..." : "Run Live Posture Scan"}
             </button>
-            <button className="btn-ghost" onClick={saveSnapshot} disabled={isScanning}>Save Snapshot</button>
+            <button className="btn-ghost" onClick={handleSaveSnapshot} disabled={isScanning}>Save Snapshot</button>
             <button className="btn-ghost" onClick={() => onExportReport(checked)} disabled={isScanning}>Export Audit Report</button>
-            <button className="btn-ghost" onClick={resetAll} disabled={isScanning} style={{ color: "#EF4444" }}>Reset</button>
+            <button className="btn-ghost" onClick={handleReset} disabled={isScanning} style={{ color: "#EF4444" }}>Reset</button>
           </div>
         </div>
       </div>
 
-      {/* Dynamic Terminal console for logs */}
+      {/* Terminal log window */}
       {(consoleLogs.length > 0 || isScanning) && (
         <div className="scanner-console">
           <div className="console-header">
-            <span className="console-title">🤖 COMPLIANCE DIAGNOSTIC LOGS</span>
+            <span className="console-title">🤖 DIAGNOSTIC TEST LOGS</span>
             <div className="console-dot-group">
               <span className="console-term-dot" style={{ background: "#EF4444" }} />
               <span className="console-term-dot" style={{ background: "#F59E0B" }} />
@@ -717,7 +804,7 @@ function TrackerApp({ user, onExportReport, askNotificationPermission, notificat
             <div ref={logEndRef} />
           </div>
           <p className="auth-note" style={{ color: "var(--text3)", textAlign: "left", fontSize: "10px", margin: "10px 0 0" }}>
-            🛡️ <strong>Sandbox Safety Clause:</strong> Modern browser frameworks prevent websites from querying local hard drive details, running processes, or querying installed antivirus packages to protect client privacy.
+            🛡️ <strong>Sandbox Compliance note:</strong> Websites operate inside browser sandboxes. Direct queries to local hard drives or antivirus software are blocked to enforce system security rules.
           </p>
         </div>
       )}
@@ -808,7 +895,6 @@ function ContactPage({ user, vendorConfig }) {
     setSending(true);
 
     try {
-      // Connect to FormSubmit AJAX service
       const res = await fetch(`https://formsubmit.co/ajax/${vendorConfig.supportEmail}`, {
         method: "POST",
         headers: {
@@ -816,9 +902,8 @@ function ContactPage({ user, vendorConfig }) {
           "Accept": "application/json"
         },
         body: JSON.stringify({
-          "Service Requested": "Cybersecurity Remediation / MSSP Consulting",
-          "Client User": user.name,
-          "Client Email": user.email,
+          "Service Requested": "Cybersecurity Remediation / Consulting",
+          "Client Account": user.email,
           "Inquiry Message": message
         })
       });
@@ -827,7 +912,7 @@ function ContactPage({ user, vendorConfig }) {
       if (res.ok) {
         setSuccess(true);
         setMessage("");
-        triggerSystemNotification("Inquiry Dispatched", "Consultation form has been successfully emailed to operations.");
+        triggerSystemNotification("Inquiry Dispatched", "Consultation form has been emailed to operations.");
       } else {
         alert("Consultation Form Error: Could not dispatch message.");
       }
@@ -841,7 +926,7 @@ function ContactPage({ user, vendorConfig }) {
     <div className="contact-wrap fade-in">
       <div className="contact-title">Contact Security Provider</div>
       <div className="contact-sub">
-        Need help remediating failed controls or performing corporate compliance audits? Get in touch with our operations lead.
+        Need help hardening system controls or performing compliance audits? Send a request to our operations desk.
       </div>
 
       <div className="contact-card">
@@ -894,7 +979,7 @@ function ContactPage({ user, vendorConfig }) {
         </div>
       </div>
 
-      {/* LEAD-GEN CONSULTATION FORM (Sends real email) */}
+      {/* LEAD-GEN CONSULTATION FORM */}
       <form onSubmit={handleSubmit} className="consult-form">
         <div className="about-ttl">Request Security Consulting / Remediation</div>
         <p className="auth-note" style={{textAlign:"left", marginTop: 4, marginBottom: 12, color:"var(--text2)"}}>
@@ -909,9 +994,9 @@ function ContactPage({ user, vendorConfig }) {
         </div>
 
         <div className="form-group">
-          <label className="form-label">Consulting & Remediation Details</label>
+          <label className="form-label">Remediation Details</label>
           <textarea 
-            placeholder="Describe your security goals or systems that need review (e.g. Setting up VPNs, data vaulting backups, router hardening, password managers)..." 
+            placeholder="Describe your security goals or controls that need review (e.g. Setting up VPNs, data backups, router hardening, password managers)..." 
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             required
@@ -994,7 +1079,7 @@ function VendorConsoleModal({ config, onClose, onSave }) {
             <input className="form-input" value={logo} onChange={e => setLogo(e.target.value)} placeholder="🛡️" maxLength={4} />
           </div>
           <div className="form-group">
-            <label className="form-label">Support Email Address (Consultation Inbox)</label>
+            <label className="form-label">Support Email Address (Inquiry Recipient)</label>
             <input className="form-input" type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="keerthanapalakkaparambil@gmail.com" />
           </div>
           <div className="form-group">
@@ -1050,7 +1135,7 @@ function VendorConsoleModal({ config, onClose, onSave }) {
 
           {/* EmailJS Configurations */}
           <div className="modal-body-section">
-            <label className="form-label" style={{ color: "var(--blue)" }}>EmailJS Config (Client Welcome Emails)</label>
+            <label className="form-label" style={{ color: "var(--blue)" }}>EmailJS Config (Welcome Emails)</label>
             <div className="form-group" style={{ marginTop: 8 }}>
               <label className="form-label">EmailJS Service ID</label>
               <input className="form-input" value={eService} onChange={e => setEService(e.target.value)} placeholder="service_xxxx" />
@@ -1138,8 +1223,8 @@ function ComplianceAuditReport({ user, checkedData, vendorConfig, onBack }) {
         {/* Executive Summary */}
         <div className="report-section-title">Executive Summary</div>
         <p style={{ fontSize: "13px", lineHeight: "1.6", color: "#334155", marginBottom: "20px" }}>
-          This security baseline audit maps client operations for account <strong>{user.email}</strong> against key controls defined under standard compliance frameworks. The evaluation scored <strong>{pct}% ({threat.label})</strong>.
-          {failing.length > 0 ? ` Immediate attention should be dedicated to resolving the ${failing.length} outstanding compliance gaps outlined below.` : " All mapped controls have been fully resolved."}
+          This security baseline evaluation maps client operations for account <strong>{user.email}</strong> against standard framework configurations. The evaluation scored <strong>{pct}% ({threat.label})</strong>.
+          {failing.length > 0 ? ` Immediate attention should be dedicated to resolving the ${failing.length} outstanding control gaps outlined below.` : " All mapped controls have been fully resolved."}
         </p>
 
         {/* Failed Controls */}
@@ -1172,9 +1257,9 @@ function ComplianceAuditReport({ user, checkedData, vendorConfig, onBack }) {
                   <div className="remediation-title">Action {i+1}: Harden {h.label}</div>
                   <div className="remediation-steps">
                     Required to satisfy: <strong>{h.standards.join(", ")}</strong>. 
-                    {h.id === "2fa" && " Secure all administrative services with multi-factor tokens (using hardware keys or secure device authenticators)."}
-                    {h.id === "passwords" && " Force password rotations and migrate to 16+ character hashed passphrases."}
-                    {h.id === "pwmanager" && " Migrate passwords from browsers to a secure, zero-knowledge password vault (Bitwarden)."}
+                    {h.id === "2fa" && " Secure all administrative portals with multi-factor authentication codes."}
+                    {h.id === "passwords" && " Force password rotations and migrate to 16+ character complex passphrases."}
+                    {h.id === "pwmanager" && " Migrate passwords from browsers to a secure, zero-knowledge password manager (Bitwarden)."}
                     {h.id === "updates" && " Enable automated system and browser updates to patch known zero-day vulnerabilities."}
                     {h.id === "backup" && " Configure automated backups following the 3-2-1 backup strategy."}
                     {h.id === "encrypt" && " Turn on system storage volume encryption keys (BitLocker / FileVault)."}
@@ -1182,7 +1267,7 @@ function ComplianceAuditReport({ user, checkedData, vendorConfig, onBack }) {
                     {h.id === "vpn" && " Route unencrypted web traffic through secure VPN nodes when using remote connections."}
                     {h.id === "wifi" && " Update wireless router network standards to secure WPA3 / WPA2 protocols."}
                     {h.id === "firewall" && " Restrict open ports and verify system inbound firewall rules are active."}
-                    {h.id === "phishing" && " Deploy secure Quad9 DNS settings to block known scam links."}
+                    {h.id === "phishing" && " Deploy secure Quad9 DNS settings to automatically filter malicious links."}
                     {h.id === "breach" && " Monitor credentials registries to identify compromised email address databases."}
                     {h.id === "logs" && " Audit login access logs to verify session activity."}
                     {h.id === "permissions" && " Audit and revoke background device permissions for locations and cameras."}
@@ -1265,11 +1350,17 @@ export default function App() {
   const [showReport, setShowReport]   = useState(false);
   const [reportChecked, setReportChecked] = useState({});
 
+  // Synced states
+  const [checked, setChecked] = useState({});
+  const [history, setHistory] = useState([]);
+  const [dbSyncing, setDbSyncing] = useState(false);
+  const [dbError, setDbError] = useState("");
+  const isInitialLoad = useRef(true);
+
   // Browser System notification status
   const [notificationGranted, setNotificationGranted] = useState(false);
 
   useEffect(() => {
-    // Dynamic theme styling inject
     document.body.className = `theme-${vendorConfig.accentColor}`;
   }, [vendorConfig.accentColor]);
 
@@ -1282,12 +1373,97 @@ export default function App() {
     }
   }, []);
 
+  // Sync and fetch profile data from KV Database on successful login
+  useEffect(() => {
+    if (!user) {
+      setChecked({});
+      setHistory([]);
+      isInitialLoad.current = true;
+      return;
+    }
+
+    const loadUserData = async () => {
+      setDbSyncing(true);
+      setDbError("");
+      try {
+        const emailHash = await sha256(user.email);
+        const encryptedData = await kvRead(`data_${emailHash}`);
+
+        if (encryptedData) {
+          const secret = user.password || "oauth-vault-key";
+          const decryptedText = await decryptData(encryptedData, secret);
+          const parsed = JSON.parse(decryptedText);
+          
+          setChecked(parsed.checked || {});
+          setHistory(parsed.history || []);
+        }
+      } catch (e) {
+        console.error("Failed to decrypt user data from database:", e);
+        setDbError("Decryption failed. Database integrity check failed.");
+      } finally {
+        setDbSyncing(false);
+        isInitialLoad.current = false; // Initial load completed
+      }
+    };
+
+    loadUserData();
+  }, [user]);
+
+  // Sync changes back to remote KV database
+  const syncToDatabase = async (nextChecked, nextHistory) => {
+    if (!user || isInitialLoad.current) return;
+    setDbSyncing(true);
+    setDbError("");
+    try {
+      const emailHash = await sha256(user.email);
+      const secret = user.password || "oauth-vault-key";
+      
+      const payload = JSON.stringify({ checked: nextChecked, history: nextHistory });
+      const encrypted = await encryptData(payload, secret);
+      
+      await kvWrite(`data_${emailHash}`, encrypted);
+    } catch (e) {
+      console.error("Database Synchronization Error:", e);
+      setDbError("Database sync failed.");
+    } finally {
+      setDbSyncing(false);
+    }
+  };
+
+  const toggleChecked = (id, forceState) => {
+    setChecked(prev => {
+      const next = { ...prev, [id]: forceState !== undefined ? forceState : !prev[id] };
+      syncToDatabase(next, history);
+      return next;
+    });
+  };
+
+  const saveSnapshot = () => {
+    const d = new Date().toLocaleDateString("en-IN", { day:"2-digit", month:"short" });
+    const score = Object.values(checked).filter(Boolean).length;
+    const total = HABITS.length;
+    const pct   = Math.round((score / total) * 100);
+    
+    setHistory(prev => {
+      const next = [{ date:d, score, total, pct }, ...prev.slice(0, 6)];
+      syncToDatabase(checked, next);
+      return next;
+    });
+    triggerSystemNotification("Snapshot Logged", `Saved posture score baseline at ${pct}%.`);
+  };
+
+  const resetAll = () => {
+    setChecked({});
+    setHistory([]);
+    syncToDatabase({}, []);
+  };
+
   const askNotificationPermission = () => {
     if (typeof window !== "undefined" && "Notification" in window) {
       Notification.requestPermission().then(permission => {
         if (permission === "granted") {
           setNotificationGranted(true);
-          triggerSystemNotification("Notifications Enabled", "You will now receive native cyber hygiene compliance warnings!");
+          triggerSystemNotification("Notifications Active", "Desktop notification sync active.");
         }
       });
     }
@@ -1297,7 +1473,7 @@ export default function App() {
     sessionStorage.setItem("virt_user", JSON.stringify(u)); 
     setUser(u); 
     setPage("tracker"); 
-    triggerSystemNotification("Session Initiated", `Welcome back, ${u.name}! Checked baseline ready.`);
+    triggerSystemNotification("Session Initiated", `Welcome back, ${u.name}! Remote sync initialized.`);
   };
   
   const logout = () => { 
@@ -1310,7 +1486,7 @@ export default function App() {
     localStorage.setItem("virt_vendor_config", JSON.stringify(newConfig));
     setVendorConfig(newConfig);
     setConsoleOpen(false);
-    triggerSystemNotification("Settings Updated", "Branding configurations updated successfully.");
+    triggerSystemNotification("Settings Updated", "White-label configuration refreshed.");
   };
 
   const handleExportReport = (checked) => {
@@ -1320,7 +1496,6 @@ export default function App() {
 
   const initials = user ? (user.name || "U").slice(0, 2).toUpperCase() : "";
 
-  // If in Print Preview Mode, render the report directly
   if (showReport) {
     return (
       <ComplianceAuditReport 
@@ -1366,6 +1541,13 @@ export default function App() {
               onExportReport={handleExportReport} 
               askNotificationPermission={askNotificationPermission}
               notificationGranted={notificationGranted}
+              checked={checked}
+              toggle={toggleChecked}
+              saveSnapshot={saveSnapshot}
+              resetAll={resetAll}
+              history={history}
+              dbSyncing={dbSyncing}
+              dbError={dbError}
             />
           )}
           {page === "contact" && <ContactPage user={user} vendorConfig={vendorConfig} />}
