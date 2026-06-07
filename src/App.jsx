@@ -152,7 +152,7 @@ const getThreat = (pct) => {
 };
 
 // Database Bucket ID Configuration
-const KV_BUCKET_ID = "virtuous_vault_98374";
+const KV_BUCKET_ID = "DQ4k9FfkKVfLeWTJSbLiT3";
 
 // ── CRYPTOGRAPHIC VAULT LOGIC (AES-GCM Web Crypto) ───────────────────────────
 async function sha256(message) {
